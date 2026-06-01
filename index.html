@@ -75,11 +75,13 @@ input[type="range"] { width: 100px; }
 <body>
 <h1>FDTD ELECTROMAGNETIC RADIATION &mdash; HEAT TRANSFER SIMULATION</h1>
 <div id="controls">
-  <button id="btn-play" class="active">&#9654; Play</button>
-  <button id="btn-pause">&#10074;&#10074; Pause</button>
+  <button id="btn-play">&#9654; Play</button>
+  <button id="btn-pause" class="active">&#10074;&#10074; Pause</button>
   <button id="btn-reset">&#8634; Reset</button>
   <label>Steps/frame: <input type="range" id="slider-spf" min="1" max="16" value="4"><span id="val-spf">4</span></label>
   <label>Emission: <input type="range" id="slider-emission" min="1" max="100" value="50"><span id="val-emission">50</span></label>
+  <label>Refractive index: <input type="range" id="slider-n" min="10" max="40" value="15"><span id="val-n">1.5</span></label>
+  <label>Conductivity: <input type="range" id="slider-sigma" min="0" max="200" value="105"><span id="val-sigma">1.05</span></label>
 </div>
 <div id="canvas-wrap">
   <canvas id="sim" width="1024" height="512"></canvas>
@@ -197,7 +199,8 @@ const DX = 1.0;
 const DT = 1.0 / Math.sqrt(2.0); // CFL condition: dt = dx/(c*sqrt(2))
 
 // Object conductivity (gives it opacity and emissivity)
-const SIGMA_OBJ = 0.05;
+let SIGMA_OBJ = 1.05;
+let EPSILON_R = 1.5; // relative permittivity (n² for non-magnetic material)
 
 // ============================================================
 // SIMULATION STATE
@@ -214,7 +217,7 @@ let caH, cbH; // H-field loss coefficients (PML magnetic conductivity only)
 
 // Simulation counters
 let step = 0;
-let running = true;
+let running = false;
 let stepsPerFrame = 4;
 let emissionStrength = 50;
 
@@ -292,11 +295,14 @@ function initPML() {
       // H-field conductivity = PML only (matched impedance)
       const sigma_h = sigma_pml;
 
+      // Relative permittivity (εᵣ > 1 inside object slows waves)
+      const eps_r = isObject[idx] ? EPSILON_R : 1.0;
+
       // E-field update coefficients: E_new = ca*E + cb*curl_H
-      // From: ε₀ ∂E/∂t + σ_e*E = curl(H)
-      // Discrete: (E^{n+1} - E^n)/dt + σ_e*(E^{n+1}+E^n)/2 = curl_H
-      const denom_e = 1.0 + sigma_e * DT * 0.5;
-      caE[idx] = (1.0 - sigma_e * DT * 0.5) / denom_e;
+      // From: εᵣ*ε₀ ∂E/∂t + σ_e*E = curl(H)
+      // Discrete: εᵣ*(E^{n+1} - E^n)/dt + σ_e*(E^{n+1}+E^n)/2 = curl_H
+      const denom_e = eps_r + sigma_e * DT * 0.5;
+      caE[idx] = (eps_r - sigma_e * DT * 0.5) / denom_e;
       cbE[idx] = dtdx / denom_e;
 
       // H-field update coefficients: H_new = ca*H + cb*curl_E
@@ -557,6 +563,10 @@ const sliderSPF = document.getElementById('slider-spf');
 const valSPF = document.getElementById('val-spf');
 const sliderEmission = document.getElementById('slider-emission');
 const valEmission = document.getElementById('val-emission');
+const sliderN = document.getElementById('slider-n');
+const valN = document.getElementById('val-n');
+const sliderSigma = document.getElementById('slider-sigma');
+const valSigma = document.getElementById('val-sigma');
 
 btnPlay.addEventListener('click', () => {
   running = true;
@@ -592,6 +602,25 @@ sliderEmission.addEventListener('input', () => {
   valEmission.textContent = emissionStrength;
 });
 
+sliderN.addEventListener('input', () => {
+  EPSILON_R = parseInt(sliderN.value) / 10;
+  valN.textContent = EPSILON_R.toFixed(1);
+  // Update sigmaObj array with current conductivity and rebuild coefficients
+  for (let idx = 0; idx < N; idx++) {
+    if (isObject[idx]) sigmaObj[idx] = SIGMA_OBJ;
+  }
+  initPML();
+});
+
+sliderSigma.addEventListener('input', () => {
+  SIGMA_OBJ = parseInt(sliderSigma.value) / 100;
+  valSigma.textContent = SIGMA_OBJ.toFixed(2);
+  for (let idx = 0; idx < N; idx++) {
+    if (isObject[idx]) sigmaObj[idx] = SIGMA_OBJ;
+  }
+  initPML();
+});
+
 // ============================================================
 // MOUSE DRAWING
 // ============================================================
@@ -625,8 +654,8 @@ function paintAt(cx, cy) {
       else if (j >= NY - PML_D) dy_pml = (j - (NY - PML_D) + 1) / PML_D;
       const sigma_pml = sigmaMax * Math.pow(dx_pml, pmlOrder) + sigmaMax * Math.pow(dy_pml, pmlOrder);
       const sigma_e = SIGMA_OBJ + sigma_pml;
-      const denom_e = 1.0 + sigma_e * DT * 0.5;
-      caE[idx] = (1.0 - sigma_e * DT * 0.5) / denom_e;
+      const denom_e = EPSILON_R + sigma_e * DT * 0.5;
+      caE[idx] = (EPSILON_R - sigma_e * DT * 0.5) / denom_e;
       cbE[idx] = dtdx / denom_e;
     }
   }

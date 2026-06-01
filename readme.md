@@ -5,6 +5,7 @@ A browser-based 2D finite-difference time-domain (FDTD) simulation demonstrating
 ## Physics
 
 - **FDTD Method**: Solves Maxwell's equations (TM mode: Ex, Ey, Hz) on a 1024×512 Yee grid using the standard leapfrog time-stepping scheme.
+- **Refractive Index**: Objects support configurable relative permittivity (εᵣ), which slows EM waves inside the material and causes reflection at boundaries.
 - **Thermal Emission**: Stochastic electric currents are injected in the heated object proportional to T², mimicking fluctuational electrodynamics.
 - **Radiative Cooling**: The object cools following a Stefan-Boltzmann T⁴ law.
 - **Absorbing Boundaries**: A matched-impedance perfectly matched layer (PML) with quartic polynomial grading eliminates reflections at the domain edges.
@@ -12,7 +13,7 @@ A browser-based 2D finite-difference time-domain (FDTD) simulation demonstrating
 
 ## Running
 
-Open `index.html` in a modern browser. No build step or dependencies required.
+Open `index.html` in a modern browser. No build step or dependencies required. The simulation starts paused — click Play to begin.
 
 ## Controls
 
@@ -23,7 +24,9 @@ Open `index.html` in a modern browser. No build step or dependencies required.
 | Reset | Restore initial conditions (hot object, no fields) |
 | Steps/frame | Number of FDTD iterations per animation frame (1–16) |
 | Emission | Thermal emission intensity (1–100) |
-| Mouse drag | Draw new solid objects (circle brush, r=10 px, starts at 100 K) |
+| Refractive index | Relative permittivity εᵣ of the object (1.0–4.0) |
+| Conductivity | Object conductivity σ controlling absorption (0.00–2.00) |
+| Mouse drag | Draw new solid objects (circle brush, r=5 px, starts at 100 K) |
 
 ## Visualization
 
