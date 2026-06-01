@@ -1,6 +1,6 @@
 # FDTD Electromagnetic Radiation Heat Transfer Simulation
 
-A browser-based 2D finite-difference time-domain (FDTD) simulation demonstrating electromagnetic thermal radiation from a heated irregular object. The simulation visualizes how a hot body emits EM radiation that propagates outward, coupling Maxwell's equations with a simplified thermal model.
+A browser-based 2D finite-difference time-domain (FDTD) simulation demonstrating electromagnetic thermal radiation. The initial scene is the word "HEAT" rendered as a hot solid body at 100 K, which emits EM radiation that propagates outward. You can also draw additional objects into the scene with the mouse. Couples Maxwell's equations with a simplified thermal model.
 
 ## Physics
 
@@ -23,6 +23,7 @@ Open `index.html` in a modern browser. No build step or dependencies required.
 | Reset | Restore initial conditions (hot object, no fields) |
 | Steps/frame | Number of FDTD iterations per animation frame (1–16) |
 | Emission | Thermal emission intensity (1–100) |
+| Mouse drag | Draw new solid objects (circle brush, r=10 px, starts at 100 K) |
 
 ## Visualization
 

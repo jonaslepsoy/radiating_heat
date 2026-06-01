@@ -117,44 +117,73 @@ const OBJ_Y1 = OBJ_CY + 140;
 // Boolean mask for irregular object shape
 const isObject = new Uint8Array(N);
 (function buildObjectMask() {
-  // Seed a simple hash-based noise for reproducible irregular boundary
-  function hash(x, y) {
-    let h = x * 374761393 + y * 668265263;
-    h = (h ^ (h >> 13)) * 1274126177;
-    return (h ^ (h >> 16)) & 0x7fffffff;
-  }
-  function noise2d(x, y, scale) {
-    const gx = Math.floor(x / scale), gy = Math.floor(y / scale);
-    const fx = x / scale - gx, fy = y / scale - gy;
-    const n00 = hash(gx, gy) / 0x7fffffff;
-    const n10 = hash(gx + 1, gy) / 0x7fffffff;
-    const n01 = hash(gx, gy + 1) / 0x7fffffff;
-    const n11 = hash(gx + 1, gy + 1) / 0x7fffffff;
-    const nx0 = n00 * (1 - fx) + n10 * fx;
-    const nx1 = n01 * (1 - fx) + n11 * fx;
-    return nx0 * (1 - fy) + nx1 * fy;
-  }
+  // Render "HEAT" as block letters centered in the grid
+  // Each letter is defined on a 5-wide x 7-tall grid of cells
+  const letters = {
+    H: [
+      "X...X",
+      "X...X",
+      "X...X",
+      "XXXXX",
+      "X...X",
+      "X...X",
+      "X...X",
+    ],
+    E: [
+      "XXXXX",
+      "X....",
+      "X....",
+      "XXXX.",
+      "X....",
+      "X....",
+      "XXXXX",
+    ],
+    A: [
+      ".XXX.",
+      "X...X",
+      "X...X",
+      "XXXXX",
+      "X...X",
+      "X...X",
+      "X...X",
+    ],
+    T: [
+      "XXXXX",
+      "..X..",
+      "..X..",
+      "..X..",
+      "..X..",
+      "..X..",
+      "..X..",
+    ],
+  };
 
-  for (let j = 0; j < NY; j++) {
-    for (let i = 0; i < NX; i++) {
-      const dx = i - OBJ_CX;
-      const dy = j - OBJ_CY;
-      const angle = Math.atan2(dy, dx);
-      const dist = Math.sqrt(dx * dx + dy * dy);
+  const word = "HEAT";
+  const cellSize = 28;       // pixels per block-letter cell
+  const letterW = 5 * cellSize;
+  const letterH = 7 * cellSize;
+  const gap = 20;            // pixels between letters
+  const totalW = word.length * letterW + (word.length - 1) * gap;
+  const startX = Math.floor((NX - totalW) / 2);
+  const startY = Math.floor((NY - letterH) / 2);
 
-      // Base radius with angular variation (5 lobes of different sizes)
-      let radius = 100
-        + 25 * Math.cos(2 * angle + 0.5)
-        + 15 * Math.sin(3 * angle - 1.2)
-        + 10 * Math.cos(5 * angle + 2.0)
-        + 8 * Math.sin(7 * angle + 0.8);
+  for (let li = 0; li < word.length; li++) {
+    const glyph = letters[word[li]];
+    const lx = startX + li * (letterW + gap);
 
-      // Add small-scale noise for rough edges
-      radius += 12 * (noise2d(i, j, 20) - 0.5);
-      radius += 6 * (noise2d(i + 500, j + 500, 8) - 0.5);
-
-      if (dist < radius) {
-        isObject[j * NX + i] = 1;
+    for (let row = 0; row < 7; row++) {
+      for (let col = 0; col < 5; col++) {
+        if (glyph[row][col] !== 'X') continue;
+        // Fill the cellSize x cellSize block
+        const bx = lx + col * cellSize;
+        const by = startY + row * cellSize;
+        for (let py = by; py < by + cellSize; py++) {
+          for (let px = bx; px < bx + cellSize; px++) {
+            if (px >= 0 && px < NX && py >= 0 && py < NY) {
+              isObject[py * NX + px] = 1;
+            }
+          }
+        }
       }
     }
   }
@@ -333,31 +362,19 @@ function fdtdStep() {
 
   // --- Thermal emission & cooling ---
   const emFactor = emissionStrength * 1e-4;
-  for (let j = OBJ_Y0; j < OBJ_Y1; j++) {
-    const jNX = j * NX;
-    for (let i = OBJ_X0; i < OBJ_X1; i++) {
-      const idx = jNX + i;
-      if (!isObject[idx]) continue;
-      const T = temperature[idx];
-      if (T > 0.01) {
-        const amplitude = emFactor * T * T * 0.0001;
-        const r1 = Math.random() * 2 - 1;
-        const r2 = Math.random() * 2 - 1;
-        Ex[idx] += amplitude * r1;
-        Ey[idx] += amplitude * r2;
-      }
-    }
-  }
-
-  // Stefan-Boltzmann cooling
   const coolingRate = emFactor * 2e-8;
-  for (let j = OBJ_Y0; j < OBJ_Y1; j++) {
+  for (let j = PML_D; j < NY - PML_D; j++) {
     const jNX = j * NX;
-    for (let i = OBJ_X0; i < OBJ_X1; i++) {
+    for (let i = PML_D; i < NX - PML_D; i++) {
       const idx = jNX + i;
       if (!isObject[idx]) continue;
       const T = temperature[idx];
       if (T > 0.01) {
+        // Stochastic emission currents
+        const amplitude = emFactor * T * T * 0.0001;
+        Ex[idx] += amplitude * (Math.random() * 2 - 1);
+        Ey[idx] += amplitude * (Math.random() * 2 - 1);
+        // Stefan-Boltzmann cooling
         const dT = coolingRate * T * T * T * T;
         temperature[idx] = Math.max(0, T - dT);
       }
@@ -574,6 +591,72 @@ sliderEmission.addEventListener('input', () => {
   emissionStrength = parseInt(sliderEmission.value);
   valEmission.textContent = emissionStrength;
 });
+
+// ============================================================
+// MOUSE DRAWING
+// ============================================================
+let drawing = false;
+
+const BRUSH_R = 5;
+
+function paintAt(cx, cy) {
+  const dtdx = DT / DX;
+  const pmlOrder = 4;
+  const sigmaMax = 3.0;
+
+  for (let dy = -BRUSH_R; dy <= BRUSH_R; dy++) {
+    for (let dx = -BRUSH_R; dx <= BRUSH_R; dx++) {
+      if (dx * dx + dy * dy > BRUSH_R * BRUSH_R) continue;
+      const i = cx + dx;
+      const j = cy + dy;
+      if (i < 0 || i >= NX || j < 0 || j >= NY) continue;
+      const idx = j * NX + i;
+      if (isObject[idx]) continue;
+
+      isObject[idx] = 1;
+      sigmaObj[idx] = SIGMA_OBJ;
+      temperature[idx] = 100.0;
+
+      // Recompute PML coefficients for this cell
+      let dx_pml = 0, dy_pml = 0;
+      if (i < PML_D) dx_pml = (PML_D - i) / PML_D;
+      else if (i >= NX - PML_D) dx_pml = (i - (NX - PML_D) + 1) / PML_D;
+      if (j < PML_D) dy_pml = (PML_D - j) / PML_D;
+      else if (j >= NY - PML_D) dy_pml = (j - (NY - PML_D) + 1) / PML_D;
+      const sigma_pml = sigmaMax * Math.pow(dx_pml, pmlOrder) + sigmaMax * Math.pow(dy_pml, pmlOrder);
+      const sigma_e = SIGMA_OBJ + sigma_pml;
+      const denom_e = 1.0 + sigma_e * DT * 0.5;
+      caE[idx] = (1.0 - sigma_e * DT * 0.5) / denom_e;
+      cbE[idx] = dtdx / denom_e;
+    }
+  }
+}
+
+function canvasToGrid(e) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = NX / rect.width;
+  const scaleY = NY / rect.height;
+  const i = Math.floor((e.clientX - rect.left) * scaleX);
+  const j = Math.floor((e.clientY - rect.top) * scaleY);
+  return [i, j];
+}
+
+canvas.addEventListener('mousedown', (e) => {
+  drawing = true;
+  const [i, j] = canvasToGrid(e);
+  paintAt(i, j);
+  if (!running) render();
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  if (!drawing) return;
+  const [i, j] = canvasToGrid(e);
+  paintAt(i, j);
+  if (!running) render();
+});
+
+canvas.addEventListener('mouseup', () => { drawing = false; });
+canvas.addEventListener('mouseleave', () => { drawing = false; });
 
 // ============================================================
 // BOOT
