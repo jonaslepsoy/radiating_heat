@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FDTD Electromagnetic Radiation Heat Transfer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #111;
+  color: #eee;
+  font-family: 'Menlo', 'Consolas', monospace;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  padding: 16px;
+}
+h1 {
+  font-size: 14px;
+  margin-bottom: 8px;
+  color: #aaa;
+  letter-spacing: 1px;
+}
+#canvas-wrap {
+  border: 1px solid #333;
+  margin-bottom: 12px;
+}
+canvas {
+  display: block;
+  image-rendering: pixelated;
+}
+#controls {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+button {
+  background: #222;
+  border: 1px solid #555;
+  color: #eee;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+}
+button:hover { background: #333; }
+button.active { border-color: #0af; color: #0af; }
+label {
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+input[type="range"] { width: 100px; }
+#stats {
+  font-size: 11px;
+  color: #888;
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+#stats span { white-space: nowrap; }
+#legend {
+  margin-top: 10px;
+  font-size: 10px;
+  color: #666;
+  text-align: center;
+}
+</style>
+</head>
+<body>
+<h1>FDTD ELECTROMAGNETIC RADIATION &mdash; HEAT TRANSFER SIMULATION</h1>
+<div id="controls">
+  <button id="btn-play" class="active">&#9654; Play</button>
+  <button id="btn-pause">&#10074;&#10074; Pause</button>
+  <button id="btn-reverse">&#9664; Reverse</button>
+  <button id="btn-reset">&#8634; Reset</button>
+  <label>Steps/frame: <input type="range" id="slider-spf" min="1" max="16" value="4"><span id="val-spf">4</span></label>
+  <label>Emission: <input type="range" id="slider-emission" min="1" max="100" value="50"><span id="val-emission">50</span></label>
+</div>
+<div id="canvas-wrap">
+  <canvas id="sim" width="1024" height="512"></canvas>
+</div>
+<div id="stats">
+  <span>Step: <b id="stat-step">0</b></span>
+  <span>Max T: <b id="stat-maxT">100.0</b> K</span>
+  <span>Avg Object T: <b id="stat-avgT">100.0</b> K</span>
+  <span>EM Energy: <b id="stat-em">0.00</b></span>
+  <span>FPS: <b id="stat-fps">0</b></span>
+</div>
+<div id="legend">
+  Color: temperature (black→blue→red→yellow→white) | Brightness overlay: |E| field intensity
+</div>
+
+<script>
+"use strict";
+
+// ============================================================
+// GRID & PHYSICAL CONSTANTS
+// ============================================================
+const NX = 1024;
+const NY = 512;
+const N = NX * NY;
+
+// Object geometry — irregular shape centered in grid
+const OBJ_CX = NX >> 1;  // 512 (center x)
+const OBJ_CY = NY >> 1;  // 256 (center y)
+// Bounding box (for iteration efficiency)
+const OBJ_X0 = OBJ_CX - 140;
+const OBJ_Y0 = OBJ_CY - 140;
+const OBJ_X1 = OBJ_CX + 140;
+const OBJ_Y1 = OBJ_CY + 140;
+
+// Boolean mask for irregular object shape
+const isObject = new Uint8Array(N);
+(function buildObjectMask() {
+  // Seed a simple hash-based noise for reproducible irregular boundary
+  function hash(x, y) {
+    let h = x * 374761393 + y * 668265263;
+    h = (h ^ (h >> 13)) * 1274126177;
+    return (h ^ (h >> 16)) & 0x7fffffff;
+  }
+  function noise2d(x, y, scale) {
+    const gx = Math.floor(x / scale), gy = Math.floor(y / scale);
+    const fx = x / scale - gx, fy = y / scale - gy;
+    const n00 = hash(gx, gy) / 0x7fffffff;
+    const n10 = hash(gx + 1, gy) / 0x7fffffff;
+    const n01 = hash(gx, gy + 1) / 0x7fffffff;
+    const n11 = hash(gx + 1, gy + 1) / 0x7fffffff;
+    const nx0 = n00 * (1 - fx) + n10 * fx;
+    const nx1 = n01 * (1 - fx) + n11 * fx;
+    return nx0 * (1 - fy) + nx1 * fy;
+  }
+
+  for (let j = 0; j < NY; j++) {
+    for (let i = 0; i < NX; i++) {
+      const dx = i - OBJ_CX;
+      const dy = j - OBJ_CY;
+      const angle = Math.atan2(dy, dx);
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      // Base radius with angular variation (5 lobes of different sizes)
+      let radius = 100
+        + 25 * Math.cos(2 * angle + 0.5)
+        + 15 * Math.sin(3 * angle - 1.2)
+        + 10 * Math.cos(5 * angle + 2.0)
+        + 8 * Math.sin(7 * angle + 0.8);
+
+      // Add small-scale noise for rough edges
+      radius += 12 * (noise2d(i, j, 20) - 0.5);
+      radius += 6 * (noise2d(i + 500, j + 500, 8) - 0.5);
+
+      if (dist < radius) {
+        isObject[j * NX + i] = 1;
+      }
+    }
+  }
+})();
+
+// Absorbing layer thickness (matched-impedance PML)
+const PML_D = 40;
+
+// Normalized units: dx = dy = 1, c = 1, ε₀ = 1, μ₀ = 1
+const DX = 1.0;
+const DT = 1.0 / Math.sqrt(2.0); // CFL condition: dt = dx/(c*sqrt(2))
+
+// Object conductivity (gives it opacity and emissivity)
+const SIGMA_OBJ = 0.05;
+
+// ============================================================
+// SIMULATION STATE
+// ============================================================
+let Ex, Ey, Hz;
+let temperature;
+let sigmaObj; // object conductivity only
+
+// PML precomputed update coefficients (matched impedance: same for E and H)
+// For E: Ex_new = caE[idx]*Ex + cbE[idx]*curl_H
+// For H: Hz_new = caH[idx]*Hz + cbH[idx]*curl_E
+let caE, cbE; // E-field loss coefficients (includes object + PML conductivity)
+let caH, cbH; // H-field loss coefficients (PML magnetic conductivity only)
+
+// Simulation counters
+let step = 0;
+let running = true;
+let timeDirection = 1; // +1 forward, -1 reverse
+let stepsPerFrame = 4;
+let emissionStrength = 50;
+
+// ============================================================
+// INITIALIZATION
+// ============================================================
+function initArrays() {
+  Ex = new Float32Array(N);
+  Ey = new Float32Array(N);
+  Hz = new Float32Array(N);
+  temperature = new Float32Array(N);
+  sigmaObj = new Float32Array(N);
+
+  // Initialize temperature and object conductivity using the shape mask
+  for (let idx = 0; idx < N; idx++) {
+    if (isObject[idx]) {
+      temperature[idx] = 100.0;
+      sigmaObj[idx] = SIGMA_OBJ;
+    }
+  }
+}
+
+// ============================================================
+// MATCHED-IMPEDANCE ABSORBING LAYER (PML)
+//
+// Principle: When σ_E/ε₀ = σ_H/μ₀, the medium has the same impedance
+// as free space (η = sqrt(μ/ε) = 1 regardless of σ). This means
+// ZERO reflection at any interface within the graded layer.
+//
+// Waves are attenuated exponentially as they propagate through the
+// lossy region. With polynomial grading, the transition is smooth
+// and produces no numerical artifacts.
+//
+// The PML conductivity is σ_pml(d) = σ_max * (d/D)^m where d is
+// distance from inner boundary. We use m=4 (quartic) for an extra
+// smooth transition with very low discrete reflection.
+// ============================================================
+function initPML() {
+  const pmlOrder = 4;     // Quartic polynomial grading
+  const sigmaMax = 3.0;   // Maximum PML conductivity (very strong absorption)
+
+  // Precompute per-cell update coefficients
+  caE = new Float32Array(N);
+  cbE = new Float32Array(N);
+  caH = new Float32Array(N);
+  cbH = new Float32Array(N);
+
+  const dtdx = DT / DX;
+
+  for (let j = 0; j < NY; j++) {
+    for (let i = 0; i < NX; i++) {
+      const idx = j * NX + i;
+
+      // Compute PML depth for this cell (max of x and y depth)
+      // Use the maximum to properly handle corners
+      let dx_pml = 0, dy_pml = 0;
+      if (i < PML_D) {
+        dx_pml = (PML_D - i) / PML_D;
+      } else if (i >= NX - PML_D) {
+        dx_pml = (i - (NX - PML_D) + 1) / PML_D;
+      }
+      if (j < PML_D) {
+        dy_pml = (PML_D - j) / PML_D;
+      } else if (j >= NY - PML_D) {
+        dy_pml = (j - (NY - PML_D) + 1) / PML_D;
+      }
+
+      // Combine x and y PML conductivities (additive for corner regions)
+      const sigma_pml_x = sigmaMax * Math.pow(dx_pml, pmlOrder);
+      const sigma_pml_y = sigmaMax * Math.pow(dy_pml, pmlOrder);
+      const sigma_pml = sigma_pml_x + sigma_pml_y;
+
+      // Total E-field conductivity = object + PML
+      const sigma_e = sigmaObj[idx] + sigma_pml;
+      // H-field conductivity = PML only (matched impedance)
+      const sigma_h = sigma_pml;
+
+      // E-field update coefficients: E_new = ca*E + cb*curl_H
+      // From: ε₀ ∂E/∂t + σ_e*E = curl(H)
+      // Discrete: (E^{n+1} - E^n)/dt + σ_e*(E^{n+1}+E^n)/2 = curl_H
+      const denom_e = 1.0 + sigma_e * DT * 0.5;
+      caE[idx] = (1.0 - sigma_e * DT * 0.5) / denom_e;
+      cbE[idx] = dtdx / denom_e;
+
+      // H-field update coefficients: H_new = ca*H + cb*curl_E
+      // From: μ₀ ∂H/∂t + σ_h*H = -curl(E) ... but we use +curl in TM
+      const denom_h = 1.0 + sigma_h * DT * 0.5;
+      caH[idx] = (1.0 - sigma_h * DT * 0.5) / denom_h;
+      cbH[idx] = dtdx / denom_h;
+    }
+  }
+}
+
+// ============================================================
+// FDTD UPDATE STEP
+// ============================================================
+function fdtdStep() {
+  const dir = timeDirection; // +1 or -1
+
+  // --- Update Hz (magnetic field in z) ---
+  // μ₀ ∂Hz/∂t + σ_h*Hz = ∂Ex/∂y - ∂Ey/∂x
+  // Hz_new = caH*Hz + dir*cbH*(dEx/dy - dEy/dx)
+  for (let j = 0; j < NY - 1; j++) {
+    const jNX = j * NX;
+    const j1NX = (j + 1) * NX;
+
+    for (let i = 0; i < NX - 1; i++) {
+      const idx = jNX + i;
+
+      const dExdy = Ex[j1NX + i] - Ex[idx];
+      const dEydx = Ey[idx + 1] - Ey[idx];
+
+      Hz[idx] = caH[idx] * Hz[idx] + dir * cbH[idx] * (dExdy - dEydx);
+    }
+  }
+
+  // --- Update Ex (electric field x-component) ---
+  // ε₀ ∂Ex/∂t + σ_e*Ex = ∂Hz/∂y
+  // Ex_new = caE*Ex + dir*cbE*dHz/dy
+  for (let j = 1; j < NY - 1; j++) {
+    const jNX = j * NX;
+    const jm1NX = (j - 1) * NX;
+
+    for (let i = 0; i < NX - 1; i++) {
+      const idx = jNX + i;
+
+      const dHzdy = Hz[idx] - Hz[jm1NX + i];
+
+      Ex[idx] = caE[idx] * Ex[idx] + dir * cbE[idx] * dHzdy;
+    }
+  }
+
+  // --- Update Ey (electric field y-component) ---
+  // ε₀ ∂Ey/∂t + σ_e*Ey = -∂Hz/∂x
+  // Ey_new = caE*Ey - dir*cbE*dHz/dx
+  for (let j = 0; j < NY - 1; j++) {
+    const jNX = j * NX;
+
+    for (let i = 1; i < NX - 1; i++) {
+      const idx = jNX + i;
+
+      const dHzdx = Hz[idx] - Hz[idx - 1];
+
+      Ey[idx] = caE[idx] * Ey[idx] - dir * cbE[idx] * dHzdx;
+    }
+  }
+
+  // --- Thermal emission & cooling only in forward mode ---
+  if (dir > 0) {
+    // Inject stochastic currents in object cells
+    const emFactor = emissionStrength * 1e-4;
+    for (let j = OBJ_Y0; j < OBJ_Y1; j++) {
+      const jNX = j * NX;
+      for (let i = OBJ_X0; i < OBJ_X1; i++) {
+        const idx = jNX + i;
+        if (!isObject[idx]) continue;
+        const T = temperature[idx];
+        if (T > 0.01) {
+          const amplitude = emFactor * T * T * 0.0001;
+          const r1 = Math.random() * 2 - 1;
+          const r2 = Math.random() * 2 - 1;
+          Ex[idx] += amplitude * r1;
+          Ey[idx] += amplitude * r2;
+        }
+      }
+    }
+
+    // Stefan-Boltzmann cooling
+    const coolingRate = emFactor * 2e-8;
+    for (let j = OBJ_Y0; j < OBJ_Y1; j++) {
+      const jNX = j * NX;
+      for (let i = OBJ_X0; i < OBJ_X1; i++) {
+        const idx = jNX + i;
+        if (!isObject[idx]) continue;
+        const T = temperature[idx];
+        if (T > 0.01) {
+          const dT = coolingRate * T * T * T * T;
+          temperature[idx] = Math.max(0, T - dT);
+        }
+      }
+    }
+  }
+
+  // --- EM energy → temperature in vacuum (visualization only) ---
+  // Only in interior (non-PML) region. Add slow decay so temperature
+  // doesn't just accumulate forever.
+  for (let j = PML_D; j < NY - PML_D; j++) {
+    const jNX = j * NX;
+    for (let i = PML_D; i < NX - PML_D; i++) {
+      const idx = jNX + i;
+      if (sigmaObj[idx] === 0) {
+        const emEnergy = Ex[idx] * Ex[idx] + Ey[idx] * Ey[idx];
+        if (emEnergy > 1e-12) {
+          temperature[idx] += emEnergy * 0.001;
+        }
+        // Slow decay so temperature doesn't accumulate at edges
+        temperature[idx] *= 0.9999;
+        if (temperature[idx] > 50) temperature[idx] = 50;
+      }
+    }
+  }
+
+  step++;
+}
+
+// ============================================================
+// VISUALIZATION
+// ============================================================
+const canvas = document.getElementById('sim');
+const ctx = canvas.getContext('2d');
+const imageData = ctx.createImageData(NX, NY);
+const pixels = imageData.data;
+
+// Temperature colormap: 0K=black, ~25K=blue, ~50K=red, ~75K=yellow, 100K=white
+function tempToRGB(T) {
+  const t = Math.min(1.0, Math.max(0.0, T / 100.0));
+  let r, g, b;
+  if (t < 0.25) {
+    const s = t / 0.25;
+    r = 0; g = 0; b = Math.floor(s * 180);
+  } else if (t < 0.5) {
+    const s = (t - 0.25) / 0.25;
+    r = Math.floor(s * 255); g = 0; b = Math.floor((1 - s) * 180);
+  } else if (t < 0.75) {
+    const s = (t - 0.5) / 0.25;
+    r = 255; g = Math.floor(s * 220); b = 0;
+  } else {
+    const s = (t - 0.75) / 0.25;
+    r = 255; g = 220 + Math.floor(s * 35); b = Math.floor(s * 255);
+  }
+  return [r, g, b];
+}
+
+function render() {
+  // Find max |E| only in the interior (skip PML for normalization)
+  let maxE2 = 0;
+  for (let j = PML_D; j < NY - PML_D; j++) {
+    const jNX = j * NX;
+    for (let i = PML_D; i < NX - PML_D; i++) {
+      const idx = jNX + i;
+      const e2 = Ex[idx] * Ex[idx] + Ey[idx] * Ey[idx];
+      if (e2 > maxE2) maxE2 = e2;
+    }
+  }
+  const emScale = maxE2 > 1e-20 ? 1.0 / Math.sqrt(maxE2) : 0;
+
+  for (let j = 0; j < NY; j++) {
+    const jNX = j * NX;
+    // Check if this row is in the PML
+    const inPmlY = (j < PML_D || j >= NY - PML_D);
+
+    for (let i = 0; i < NX; i++) {
+      const idx = jNX + i;
+      const p = idx << 2;
+
+      // Mask PML region as black — don't render absorbing layer
+      if (inPmlY || i < PML_D || i >= NX - PML_D) {
+        pixels[p] = 0;
+        pixels[p + 1] = 0;
+        pixels[p + 2] = 0;
+        pixels[p + 3] = 255;
+        continue;
+      }
+
+      const T = temperature[idx];
+      const [r, g, b] = tempToRGB(T);
+
+      // EM field intensity overlay (additive brightness)
+      const eIntensity = Math.sqrt(Ex[idx] * Ex[idx] + Ey[idx] * Ey[idx]) * emScale;
+      const emBoost = Math.min(1.0, eIntensity * 3.0);
+
+      // Composite: temperature color + EM brightness
+      pixels[p]     = Math.min(255, r + Math.floor(emBoost * 120));
+      pixels[p + 1] = Math.min(255, g + Math.floor(emBoost * 140));
+      pixels[p + 2] = Math.min(255, b + Math.floor(emBoost * 180));
+      pixels[p + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+}
+
+// ============================================================
+// STATS
+// ============================================================
+const statStep = document.getElementById('stat-step');
+const statMaxT = document.getElementById('stat-maxT');
+const statAvgT = document.getElementById('stat-avgT');
+const statEM = document.getElementById('stat-em');
+const statFPS = document.getElementById('stat-fps');
+
+function updateStats() {
+  let maxT = 0;
+  let sumT = 0;
+  let objCount = 0;
+  let emEnergy = 0;
+
+  for (let j = OBJ_Y0; j < OBJ_Y1; j++) {
+    const jNX = j * NX;
+    for (let i = OBJ_X0; i < OBJ_X1; i++) {
+      const idx = jNX + i;
+      if (!isObject[idx]) continue;
+      const T = temperature[idx];
+      if (T > maxT) maxT = T;
+      sumT += T;
+      objCount++;
+    }
+  }
+
+  for (let idx = 0; idx < N; idx += 4) {
+    emEnergy += Ex[idx] * Ex[idx] + Ey[idx] * Ey[idx] + Hz[idx] * Hz[idx];
+  }
+
+  statStep.textContent = step;
+  statMaxT.textContent = maxT.toFixed(1);
+  statAvgT.textContent = (sumT / objCount).toFixed(1);
+  statEM.textContent = (emEnergy * 4).toExponential(2);
+}
+
+// ============================================================
+// ANIMATION LOOP
+// ============================================================
+let lastTime = performance.now();
+let frameCount = 0;
+let fpsTime = 0;
+
+function animate(now) {
+  if (running) {
+    for (let s = 0; s < stepsPerFrame; s++) {
+      fdtdStep();
+    }
+    render();
+
+    frameCount++;
+    fpsTime += now - lastTime;
+    if (fpsTime >= 1000) {
+      statFPS.textContent = frameCount;
+      frameCount = 0;
+      fpsTime = 0;
+    }
+
+    if (step % (stepsPerFrame * 10) === 0) {
+      updateStats();
+    }
+  }
+  lastTime = now;
+  requestAnimationFrame(animate);
+}
+
+// ============================================================
+// UI CONTROLS
+// ============================================================
+const btnPlay = document.getElementById('btn-play');
+const btnPause = document.getElementById('btn-pause');
+const btnReverse = document.getElementById('btn-reverse');
+const btnReset = document.getElementById('btn-reset');
+const sliderSPF = document.getElementById('slider-spf');
+const valSPF = document.getElementById('val-spf');
+const sliderEmission = document.getElementById('slider-emission');
+const valEmission = document.getElementById('val-emission');
+
+btnPlay.addEventListener('click', () => {
+  running = true;
+  timeDirection = 1;
+  btnPlay.classList.add('active');
+  btnPause.classList.remove('active');
+  btnReverse.classList.remove('active');
+});
+
+btnPause.addEventListener('click', () => {
+  running = false;
+  btnPause.classList.add('active');
+  btnPlay.classList.remove('active');
+  btnReverse.classList.remove('active');
+});
+
+btnReverse.addEventListener('click', () => {
+  running = true;
+  timeDirection = -1;
+  btnReverse.classList.add('active');
+  btnPlay.classList.remove('active');
+  btnPause.classList.remove('active');
+});
+
+btnReset.addEventListener('click', () => {
+  step = 0;
+  Ex.fill(0);
+  Ey.fill(0);
+  Hz.fill(0);
+  for (let idx = 0; idx < N; idx++) {
+    temperature[idx] = isObject[idx] ? 100.0 : 0.0;
+  }
+  render();
+  updateStats();
+});
+
+sliderSPF.addEventListener('input', () => {
+  stepsPerFrame = parseInt(sliderSPF.value);
+  valSPF.textContent = stepsPerFrame;
+});
+
+sliderEmission.addEventListener('input', () => {
+  emissionStrength = parseInt(sliderEmission.value);
+  valEmission.textContent = emissionStrength;
+});
+
+// ============================================================
+// BOOT
+// ============================================================
+initArrays();
+initPML();
+render();
+updateStats();
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
