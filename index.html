@@ -77,7 +77,6 @@ input[type="range"] { width: 100px; }
 <div id="controls">
   <button id="btn-play" class="active">&#9654; Play</button>
   <button id="btn-pause">&#10074;&#10074; Pause</button>
-  <button id="btn-reverse">&#9664; Reverse</button>
   <button id="btn-reset">&#8634; Reset</button>
   <label>Steps/frame: <input type="range" id="slider-spf" min="1" max="16" value="4"><span id="val-spf">4</span></label>
   <label>Emission: <input type="range" id="slider-emission" min="1" max="100" value="50"><span id="val-emission">50</span></label>
@@ -187,7 +186,6 @@ let caH, cbH; // H-field loss coefficients (PML magnetic conductivity only)
 // Simulation counters
 let step = 0;
 let running = true;
-let timeDirection = 1; // +1 forward, -1 reverse
 let stepsPerFrame = 4;
 let emissionStrength = 50;
 
@@ -285,11 +283,9 @@ function initPML() {
 // FDTD UPDATE STEP
 // ============================================================
 function fdtdStep() {
-  const dir = timeDirection; // +1 or -1
-
   // --- Update Hz (magnetic field in z) ---
   // μ₀ ∂Hz/∂t + σ_h*Hz = ∂Ex/∂y - ∂Ey/∂x
-  // Hz_new = caH*Hz + dir*cbH*(dEx/dy - dEy/dx)
+  // Hz_new = caH*Hz + cbH*(dEx/dy - dEy/dx)
   for (let j = 0; j < NY - 1; j++) {
     const jNX = j * NX;
     const j1NX = (j + 1) * NX;
@@ -300,13 +296,13 @@ function fdtdStep() {
       const dExdy = Ex[j1NX + i] - Ex[idx];
       const dEydx = Ey[idx + 1] - Ey[idx];
 
-      Hz[idx] = caH[idx] * Hz[idx] + dir * cbH[idx] * (dExdy - dEydx);
+      Hz[idx] = caH[idx] * Hz[idx] + cbH[idx] * (dExdy - dEydx);
     }
   }
 
   // --- Update Ex (electric field x-component) ---
   // ε₀ ∂Ex/∂t + σ_e*Ex = ∂Hz/∂y
-  // Ex_new = caE*Ex + dir*cbE*dHz/dy
+  // Ex_new = caE*Ex + cbE*dHz/dy
   for (let j = 1; j < NY - 1; j++) {
     const jNX = j * NX;
     const jm1NX = (j - 1) * NX;
@@ -316,13 +312,13 @@ function fdtdStep() {
 
       const dHzdy = Hz[idx] - Hz[jm1NX + i];
 
-      Ex[idx] = caE[idx] * Ex[idx] + dir * cbE[idx] * dHzdy;
+      Ex[idx] = caE[idx] * Ex[idx] + cbE[idx] * dHzdy;
     }
   }
 
   // --- Update Ey (electric field y-component) ---
   // ε₀ ∂Ey/∂t + σ_e*Ey = -∂Hz/∂x
-  // Ey_new = caE*Ey - dir*cbE*dHz/dx
+  // Ey_new = caE*Ey - cbE*dHz/dx
   for (let j = 0; j < NY - 1; j++) {
     const jNX = j * NX;
 
@@ -331,42 +327,39 @@ function fdtdStep() {
 
       const dHzdx = Hz[idx] - Hz[idx - 1];
 
-      Ey[idx] = caE[idx] * Ey[idx] - dir * cbE[idx] * dHzdx;
+      Ey[idx] = caE[idx] * Ey[idx] - cbE[idx] * dHzdx;
     }
   }
 
-  // --- Thermal emission & cooling only in forward mode ---
-  if (dir > 0) {
-    // Inject stochastic currents in object cells
-    const emFactor = emissionStrength * 1e-4;
-    for (let j = OBJ_Y0; j < OBJ_Y1; j++) {
-      const jNX = j * NX;
-      for (let i = OBJ_X0; i < OBJ_X1; i++) {
-        const idx = jNX + i;
-        if (!isObject[idx]) continue;
-        const T = temperature[idx];
-        if (T > 0.01) {
-          const amplitude = emFactor * T * T * 0.0001;
-          const r1 = Math.random() * 2 - 1;
-          const r2 = Math.random() * 2 - 1;
-          Ex[idx] += amplitude * r1;
-          Ey[idx] += amplitude * r2;
-        }
+  // --- Thermal emission & cooling ---
+  const emFactor = emissionStrength * 1e-4;
+  for (let j = OBJ_Y0; j < OBJ_Y1; j++) {
+    const jNX = j * NX;
+    for (let i = OBJ_X0; i < OBJ_X1; i++) {
+      const idx = jNX + i;
+      if (!isObject[idx]) continue;
+      const T = temperature[idx];
+      if (T > 0.01) {
+        const amplitude = emFactor * T * T * 0.0001;
+        const r1 = Math.random() * 2 - 1;
+        const r2 = Math.random() * 2 - 1;
+        Ex[idx] += amplitude * r1;
+        Ey[idx] += amplitude * r2;
       }
     }
+  }
 
-    // Stefan-Boltzmann cooling
-    const coolingRate = emFactor * 2e-8;
-    for (let j = OBJ_Y0; j < OBJ_Y1; j++) {
-      const jNX = j * NX;
-      for (let i = OBJ_X0; i < OBJ_X1; i++) {
-        const idx = jNX + i;
-        if (!isObject[idx]) continue;
-        const T = temperature[idx];
-        if (T > 0.01) {
-          const dT = coolingRate * T * T * T * T;
-          temperature[idx] = Math.max(0, T - dT);
-        }
+  // Stefan-Boltzmann cooling
+  const coolingRate = emFactor * 2e-8;
+  for (let j = OBJ_Y0; j < OBJ_Y1; j++) {
+    const jNX = j * NX;
+    for (let i = OBJ_X0; i < OBJ_X1; i++) {
+      const idx = jNX + i;
+      if (!isObject[idx]) continue;
+      const T = temperature[idx];
+      if (T > 0.01) {
+        const dT = coolingRate * T * T * T * T;
+        temperature[idx] = Math.max(0, T - dT);
       }
     }
   }
@@ -542,7 +535,6 @@ function animate(now) {
 // ============================================================
 const btnPlay = document.getElementById('btn-play');
 const btnPause = document.getElementById('btn-pause');
-const btnReverse = document.getElementById('btn-reverse');
 const btnReset = document.getElementById('btn-reset');
 const sliderSPF = document.getElementById('slider-spf');
 const valSPF = document.getElementById('val-spf');
@@ -551,25 +543,14 @@ const valEmission = document.getElementById('val-emission');
 
 btnPlay.addEventListener('click', () => {
   running = true;
-  timeDirection = 1;
   btnPlay.classList.add('active');
   btnPause.classList.remove('active');
-  btnReverse.classList.remove('active');
 });
 
 btnPause.addEventListener('click', () => {
   running = false;
   btnPause.classList.add('active');
   btnPlay.classList.remove('active');
-  btnReverse.classList.remove('active');
-});
-
-btnReverse.addEventListener('click', () => {
-  running = true;
-  timeDirection = -1;
-  btnReverse.classList.add('active');
-  btnPlay.classList.remove('active');
-  btnPause.classList.remove('active');
 });
 
 btnReset.addEventListener('click', () => {

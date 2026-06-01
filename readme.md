@@ -20,7 +20,6 @@ Open `index.html` in a modern browser. No build step or dependencies required.
 |---------|-------------|
 | Play | Run simulation forward |
 | Pause | Freeze simulation |
-| Reverse | Run time-reversed (EM fields propagate inward) |
 | Reset | Restore initial conditions (hot object, no fields) |
 | Steps/frame | Number of FDTD iterations per animation frame (1–16) |
 | Emission | Thermal emission intensity (1–100) |
@@ -39,6 +38,4 @@ Open `index.html` in a modern browser. No build step or dependencies required.
 - **EM Energy**: Total electromagnetic energy in the domain
 - **FPS**: Rendering frame rate
 
-## Known problems
 
-- **Time-reversal** doesn't work properly at all. Everything explodes.
