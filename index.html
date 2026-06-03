@@ -78,6 +78,8 @@ input[type="range"] { width: 100px; }
   <button id="btn-play">&#9654; Play</button>
   <button id="btn-pause" class="active">&#10074;&#10074; Pause</button>
   <button id="btn-reset">&#8634; Reset</button>
+  <button id="btn-clear">&#9249; Clear World</button>
+  <label class="toggle-label">Hot (1000K): <input type="checkbox" id="chk-hot"><span id="val-hot">OFF</span></label>
   <label>Steps/frame: <input type="range" id="slider-spf" min="1" max="16" value="4"><span id="val-spf">4</span></label>
   <label>Emission: <input type="range" id="slider-emission" min="1" max="100" value="50"><span id="val-emission">50</span></label>
   <label>Refractive index: <input type="range" id="slider-n" min="10" max="40" value="15"><span id="val-n">1.5</span></label>
@@ -366,6 +368,23 @@ function fdtdStep() {
     }
   }
 
+  // --- Joule heating: EM absorption → heat (P = σ·E²) ---
+  // The conductivity attenuates EM fields inside objects; the lost
+  // energy must be deposited as heat for proper radiative transfer.
+  const jouleCoeff = DT * 0.5; // half-step averaging factor
+  for (let j = PML_D; j < NY - PML_D; j++) {
+    const jNX = j * NX;
+    for (let i = PML_D; i < NX - PML_D; i++) {
+      const idx = jNX + i;
+      if (!isObject[idx]) continue;
+      const sigma = sigmaObj[idx];
+      if (sigma > 0) {
+        const e2 = Ex[idx] * Ex[idx] + Ey[idx] * Ey[idx];
+        temperature[idx] += sigma * e2 * jouleCoeff;
+      }
+    }
+  }
+
   // --- Thermal emission & cooling ---
   const emFactor = emissionStrength * 1e-4;
   const coolingRate = emFactor * 2e-8;
@@ -437,6 +456,12 @@ function tempToRGB(T) {
   return [r, g, b];
 }
 
+// Smoothed |E| max across frames. Without smoothing, a sudden bright
+// hotspot (e.g. cells freshly drawn while the simulation is running)
+// collapses emScale and visually wipes out the existing wave pattern,
+// which makes it look like the simulation reset.
+let smoothedMaxE = 0;
+
 function render() {
   // Find max |E| only in the interior (skip PML for normalization)
   let maxE2 = 0;
@@ -448,7 +473,10 @@ function render() {
       if (e2 > maxE2) maxE2 = e2;
     }
   }
-  const emScale = maxE2 > 1e-20 ? 1.0 / Math.sqrt(maxE2) : 0;
+  const currentMaxE = Math.sqrt(maxE2);
+  // Exponential moving average so transient spikes don't dominate.
+  smoothedMaxE = smoothedMaxE * 0.95 + currentMaxE * 0.05;
+  const emScale = smoothedMaxE > 1e-10 ? 1.0 / smoothedMaxE : 0;
 
   for (let j = 0; j < NY; j++) {
     const jNX = j * NX;
@@ -588,6 +616,7 @@ btnReset.addEventListener('click', () => {
   for (let idx = 0; idx < N; idx++) {
     temperature[idx] = isObject[idx] ? 100.0 : 0.0;
   }
+  smoothedMaxE = 0;
   render();
   updateStats();
 });
@@ -621,6 +650,31 @@ sliderSigma.addEventListener('input', () => {
   initPML();
 });
 
+// Clear World button
+const btnClear = document.getElementById('btn-clear');
+btnClear.addEventListener('click', () => {
+  step = 0;
+  Ex.fill(0);
+  Ey.fill(0);
+  Hz.fill(0);
+  temperature.fill(0);
+  isObject.fill(0);
+  sigmaObj.fill(0);
+  smoothedMaxE = 0;
+  initPML();
+  render();
+  updateStats();
+});
+
+// Hot draw toggle
+const chkHot = document.getElementById('chk-hot');
+const valHot = document.getElementById('val-hot');
+let hotDraw = false;
+chkHot.addEventListener('change', () => {
+  hotDraw = chkHot.checked;
+  valHot.textContent = hotDraw ? 'ON' : 'OFF';
+});
+
 // ============================================================
 // MOUSE DRAWING
 // ============================================================
@@ -633,9 +687,10 @@ function paintAt(cx, cy) {
   const pmlOrder = 4;
   const sigmaMax = 3.0;
 
+  const rSq = (BRUSH_R - 0.5) * (BRUSH_R - 0.5);
   for (let dy = -BRUSH_R; dy <= BRUSH_R; dy++) {
     for (let dx = -BRUSH_R; dx <= BRUSH_R; dx++) {
-      if (dx * dx + dy * dy > BRUSH_R * BRUSH_R) continue;
+      if (dx * dx + dy * dy > rSq) continue;
       const i = cx + dx;
       const j = cy + dy;
       if (i < 0 || i >= NX || j < 0 || j >= NY) continue;
@@ -644,7 +699,7 @@ function paintAt(cx, cy) {
 
       isObject[idx] = 1;
       sigmaObj[idx] = SIGMA_OBJ;
-      temperature[idx] = 100.0;
+      temperature[idx] = hotDraw ? 1000.0 : 100.0;
 
       // Recompute PML coefficients for this cell
       let dx_pml = 0, dy_pml = 0;
