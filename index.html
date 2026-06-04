@@ -70,6 +70,45 @@ input[type="range"] { width: 100px; }
   color: #666;
   text-align: center;
 }
+/* iOS-like switch */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.switch .slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #3a3a3c;
+  transition: background-color 0.2s ease;
+  border-radius: 20px;
+}
+.switch .slider::before {
+  content: "";
+  position: absolute;
+  height: 16px;
+  width: 16px;
+  left: 2px;
+  top: 2px;
+  background-color: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s ease;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+}
+.switch input:checked + .slider {
+  background-color: #34c759;
+}
+.switch input:checked + .slider::before {
+  transform: translateX(16px);
+}
 </style>
 </head>
 <body>
@@ -79,7 +118,7 @@ input[type="range"] { width: 100px; }
   <button id="btn-pause" class="active">&#10074;&#10074; Pause</button>
   <button id="btn-reset">&#8634; Reset</button>
   <button id="btn-clear">&#9249; Clear World</button>
-  <label class="toggle-label">Hot (1000K): <input type="checkbox" id="chk-hot"><span id="val-hot">OFF</span></label>
+  <span class="toggle-label" style="font-size:11px;display:flex;align-items:center;gap:6px;">Brush temperature: <label class="switch"><input type="checkbox" id="chk-hot" checked="checked"><span class="slider"></span></label><span id="val-hot" style="display:inline-block;min-width:42px;text-align:left;">1000K</span></span>
   <label>Steps/frame: <input type="range" id="slider-spf" min="1" max="16" value="4"><span id="val-spf">4</span></label>
   <label>Emission: <input type="range" id="slider-emission" min="1" max="100" value="50"><span id="val-emission">50</span></label>
   <label>Refractive index: <input type="range" id="slider-n" min="10" max="40" value="15"><span id="val-n">1.5</span></label>
@@ -96,7 +135,7 @@ input[type="range"] { width: 100px; }
   <span>FPS: <b id="stat-fps">0</b></span>
 </div>
 <div id="legend">
-  Color: temperature (black→blue→red→yellow→white) | Brightness overlay: |E| field intensity
+  Color: temperature 0K→1000K (black→blue→purple→red→orange→yellow→white) | Brightness overlay: |E| field intensity
 </div>
 
 <script>
@@ -436,24 +475,39 @@ const ctx = canvas.getContext('2d');
 const imageData = ctx.createImageData(NX, NY);
 const pixels = imageData.data;
 
-// Temperature colormap: 0K=black, ~25K=blue, ~50K=red, ~75K=yellow, 100K=white
+// Thermographic colormap (logarithmic in temperature, half-decade stops).
+// Each color band represents a ~3.16× change in temperature, which gives
+// a steeper visual response than a pure log10 scale at low temperatures:
+//   ≤1K → black, ~3.16K → blue, 10K → purple, ~31.6K → red,
+//   100K → orange, ~316K → yellow, 1000K → white.
+const TEMP_STOPS = [
+  [0,   0,   0  ], // 1K      black
+  [0,   0,   180], // 3.16K   blue
+  [110, 0,   160], // 10K     purple
+  [220, 30,  40 ], // 31.6K   red
+  [255, 140, 0  ], // 100K    orange
+  [255, 230, 0  ], // 316K    yellow
+  [255, 255, 255], // 1000K   white
+];
+const TEMP_LOG_MIN = 0;   // log10(1K)
+const TEMP_LOG_MAX = 3;   // log10(1000K)
+const TEMP_LOG_SPAN = TEMP_LOG_MAX - TEMP_LOG_MIN;
 function tempToRGB(T) {
-  const t = Math.min(1.0, Math.max(0.0, T / 100.0));
-  let r, g, b;
-  if (t < 0.25) {
-    const s = t / 0.25;
-    r = 0; g = 0; b = Math.floor(s * 180);
-  } else if (t < 0.5) {
-    const s = (t - 0.25) / 0.25;
-    r = Math.floor(s * 255); g = 0; b = Math.floor((1 - s) * 180);
-  } else if (t < 0.75) {
-    const s = (t - 0.5) / 0.25;
-    r = 255; g = Math.floor(s * 220); b = 0;
-  } else {
-    const s = (t - 0.75) / 0.25;
-    r = 255; g = 220 + Math.floor(s * 35); b = Math.floor(s * 255);
-  }
-  return [r, g, b];
+  if (!(T > 0)) return [0, 0, 0];
+  const logT = Math.log10(T);
+  let t = (logT - TEMP_LOG_MIN) / TEMP_LOG_SPAN;
+  if (t <= 0) return [0, 0, 0];
+  if (t >= 1) t = 1;
+  const segs = TEMP_STOPS.length - 1;
+  const scaled = t * segs;
+  const i = Math.min(segs - 1, Math.floor(scaled));
+  const s = scaled - i;
+  const a = TEMP_STOPS[i], b = TEMP_STOPS[i + 1];
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * s),
+    Math.round(a[1] + (b[1] - a[1]) * s),
+    Math.round(a[2] + (b[2] - a[2]) * s),
+  ];
 }
 
 // Smoothed |E| max across frames. Without smoothing, a sudden bright
@@ -669,10 +723,10 @@ btnClear.addEventListener('click', () => {
 // Hot draw toggle
 const chkHot = document.getElementById('chk-hot');
 const valHot = document.getElementById('val-hot');
-let hotDraw = false;
+let hotDraw = true;
 chkHot.addEventListener('change', () => {
   hotDraw = chkHot.checked;
-  valHot.textContent = hotDraw ? 'ON' : 'OFF';
+  valHot.textContent = hotDraw ? '1000K' : '100K';
 });
 
 // ============================================================
